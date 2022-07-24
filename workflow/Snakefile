@@ -1,0 +1,112 @@
+
+import yaml
+from os.path import basename
+
+fosmids = {}
+with open("fosmids.txt") as fd:
+    for line in fd:
+        id, r1, r2 = line.split()
+        fosmids[id] = [ r1, r2 ]
+
+rule all:
+    input:
+        expand("analysis/pgap/{id}/annot.tbl", id = fosmids.keys())
+
+rule dload_gbf2tbl:
+    output:
+        "workflow/tools/gbf2tbl.pl"
+    params:
+        url = "ftp://ftp.ncbi.nlm.nih.gov/toolbox/ncbi_tools/converters/scripts/gbf2tbl.pl"
+    shell:
+        "wget -O {output} {params.url}"
+
+rule trim:
+    input:
+        r1 = lambda w: fosmids[w.id][0],
+        r2 = lambda w: fosmids[w.id][1]
+    output:
+        r1 = "analysis/trim/{id}_val_1.fq.gz",
+        r2 = "analysis/trim/{id}_val_2.fq.gz"
+    params:
+        dirname = "analysis/trim"
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "trim_galore --paired {input} --basename {wildcards.id} --output_dir {params.dirname}"
+
+rule spades:
+    input:
+        r1 = "trim/{id}_val_1.fq.gz",
+        r2 = "trim/{id}_val_2.fq.gz"
+    output:
+        "analysis/spades/{id}/scaffolds.fasta"
+    params:
+        dirname = "analysis/spades/{id}"
+    threads:
+        4
+    conda:
+        "envs/spades.yaml"
+    shell:
+        "spades.py -t {threads} -1 {input.r1} -2 {input.r2} -o {params.dirname}"
+
+rule longest_scaffold:
+    input:
+        fasta = "analysis/spades/{id}/scaffolds.fasta",
+        fw = "workflow/metadata/vector_fw.fna",
+        rv = "workflow/metadata/vector_rv.fna"
+    output:
+        fasta = "analysis/fosmids/{id}.fna",
+        info  = "analysis/fosmids/{id}.info"
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "seqkit head -n1 {input} | cutadapt --times 4 --rc --report=minimal --info-file {output.info} -g file:{input.fw} -a file:{input.rv} - > {output.fasta}"
+
+rule copy_submol:
+    input:
+        "workflow/metadata/submol.yaml"
+    output:
+        "analysis/fosmids/{id}_submol.yaml"
+    shell:
+        "cp {input} {output}"
+
+rule make_yaml:
+    input:
+        fasta  = "analysis/fosmids/{id}.fna",
+        submol = "analysis/fosmids/{id}_submol.yaml"
+    output:
+        "analysis/fosmids/{id}.yaml"
+    run:
+        sets = dict(
+            fasta  = { "class": "File", "location": basename(input.fasta)  },
+            submol = { "class": "File", "location": basename(input.submol) }
+        )
+        with open(output[0], 'w') as fd:
+            yaml.dump(sets, fd)
+
+rule pgap:
+    input:
+        yaml = "analysis/fosmids/{id}.yaml",
+        submol = "analysis/fosmids/{id}_submol.yaml"
+    output:
+        "analysis/pgap/{id}/annot.gbk"
+    params:
+        dirname = "analysis/pgap/{id}"
+    threads:
+        8
+    shell:
+        """
+        rm -r {params.dirname}
+        pgap.py --debug --ignore-all-errors --report-usage-true --cpu {threads} -o {params.dirname} {input.yaml}
+        """
+
+rule gbf2tbl:
+    input:
+        script = "workflow/tools/gbf2tbl.pl",
+        pgap   = "analysis/pgap/{id}/annot.gbk"
+    output:
+        "analysis/pgap/{id}/annot.tbl"
+    conda:
+        "envs/perl.yaml"
+    shell:
+        "perl {input.script} {input.pgap}"
