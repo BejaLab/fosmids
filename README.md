@@ -1,25 +1,54 @@
-BejaLab's fosmid assembly and annotation pipeline
-=================================================
+BejaLab fosmid assembly and annotation pipeline
+==============================================
 
-The pipeline takes the list of fosmids in `fosmids.txt` that contains three columns: fosmid name and left and right reads.
+This repository contains a Snakemake workflow for fosmid processing from reads or pre-assembled contigs.
 
-The pipeline will run:
+Input metadata (`fosmids.xlsx`)
+-------------------------------
 
-* quality trimming with `trim_galore`
-* assembly with `spades`
-* vector trimming with `cutadapt` (the vector flanks are specified in `workflow/metadata/vector_{fw,rv}.fna`)
-* annotation with `pgap` (using default metadata for _Escherichia coli_)
-* conversion to `.tbl` with gbf2tbl.pl (from [NCBI](ftp://ftp.ncbi.nlm.nih.gov/toolbox/ncbi_tools/converters/scripts/gbf2tbl.pl))
+The workflow reads `fosmids.xlsx` (sheet header) with columns:
 
-The main output files are:
+- `id`: sample identifier (used in output paths).
+- `illumina1`, `illumina2`: paired-end read files relative to `raw/`.
+- `nanopore`: long-read file relative to `raw/`.
+- `pre_assembled`: assembly FASTA relative to `pre_assembled/`.
+- `prefix`: required; used as `locus_tag_prefix` and prepended to LOCUS in final GenBank.
+- `ref_organism`: organism for PGAP `submol.yaml` (`genus_species`); defaults to `Escherichia coli` when empty.
+- `organism`: organism string written into the final transformed `.gbk`.
 
-* `analysis/fosmids/{id}.fna` -- trimmed fosmid sequence
-* `analysis/fosmids/{id}.info` -- vector trimming report
-* `analysis/pgap/{id}/annot.tbl` -- annotations in `.tbl` format
-* `analysis/pgap/{id}/annot.gbf` -- annotations in `.tbl` format
+Assembly source selection for each sample is:
+1. `illumina1`/`illumina2` -> SPAdes
+2. otherwise `nanopore` -> Flye
+3. otherwise `pre_assembled`
 
-How to run:
+Workflow overview
+-----------------
 
-* add fosmids to `fosmids.txt`
-* check that the raw data are there
-* run: `snakemake -c{threads} --use-conda`
+Depending on available inputs, the workflow performs:
+
+- read trimming for Illumina data
+- vector filtering on reads using a middle region of the vector
+- assembly (`spades.py` or `flye`)
+- vector trimming from assembled contigs
+- PGAP annotation
+- taxonomy classification with Metabuli (`metabuli classify`)
+
+Default final targets:
+
+- `output/{id}/{id}.gbk`
+- `output/{id}/{id}_classifications.tsv`
+
+How to run
+----------
+
+1. Fill `fosmids.xlsx`.
+2. Place input files in `raw/` and/or `pre_assembled/` according to metadata.
+3. Run Snakemake (profile enables Conda + Apptainer):
+
+```bash
+snakemake
+```
+
+```bash
+snakemake --use-conda --use-apptainer --cores 10
+```

@@ -1,3 +1,9 @@
 analysis/
 raw/*
-.snakemake
+.snakemake/
+databases/
+output/
+pre_assembled/
+log
+*.log
+workflow/tools/__pycache__/

@@ -1,29 +1,47 @@
+import gzip
 
+from Bio import SeqIO
 import yaml
+import pandas as pd
 from os.path import basename
+import warnings
 
-fosmids = {}
-with open("fosmids.txt") as fd:
-    for line in fd:
-        id, r1, r2 = line.split()
-        fosmids[id] = [ r1, r2 ]
+METADATA_FILE = "fosmids.xlsx"
+DEFAULT_ORGANISM = "Escherichia coli"
+
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category = UserWarning, module = re.escape("openpyxl.styles.stylesheet"))
+    metadata_df = pd.read_excel(METADATA_FILE, dtype = str, engine = "openpyxl")
+
+metadata = metadata_df.where(metadata_df.notnull(), None).set_index('id').to_dict(orient='index')
+
+fosmids = list(metadata.keys())
+
+db_dirs, db_prefixes ,= glob_wildcards("databases/{dir}/{prefix}.ndb")
+
+wildcard_constraints:
+    id = '|'.join(fosmids),
+    db_dir = '|'.join(db_dirs),
+    db_prefix = '|'.join(db_prefixes)
 
 rule all:
     input:
-        expand("analysis/pgap/{id}/annot.tbl", id = fosmids.keys())
+        expand("output/{id}/{id}.gbk", id = fosmids),
+        expand("output/{id}/{id}_classifications.tsv", id = fosmids)
+        #expand(expand("analysis/tblastn/{{id}}/{db_dir}_{db_prefix}.txt", zip, db_dir = db_dirs, db_prefix = db_prefixes), id = fosmids)
 
 rule dload_gbf2tbl:
     output:
-        "workflow/tools/gbf2tbl.pl"
+        "analysis/tools/gbf2tbl.pl"
     params:
-        url = "ftp://ftp.ncbi.nlm.nih.gov/toolbox/ncbi_tools/converters/scripts/gbf2tbl.pl"
+        url = "https://ftp.ncbi.nlm.nih.gov/toolbox/ncbi_tools/converters/scripts/gbf2tbl.pl"
     shell:
-        "wget -O {output} {params.url}"
+        "wget -qO {output} {params.url}"
 
-rule trim:
+rule trim_paired:
     input:
-        r1 = lambda w: fosmids[w.id][0],
-        r2 = lambda w: fosmids[w.id][1]
+        r1 = lambda w: f"raw/{metadata[w.id]['illumina1']}",
+        r2 = lambda w: f"raw/{metadata[w.id]['illumina2']}"
     output:
         r1 = "analysis/trim/{id}_val_1.fq.gz",
         r2 = "analysis/trim/{id}_val_2.fq.gz"
@@ -34,41 +52,158 @@ rule trim:
     shell:
         "trim_galore --paired {input} --basename {wildcards.id} --output_dir {params.dirname}"
 
-rule spades:
+rule vector_illumina_trim:
     input:
-        r1 = "trim/{id}_val_1.fq.gz",
-        r2 = "trim/{id}_val_2.fq.gz"
+        r1 = "analysis/trim/{id}_val_1.fq.gz",
+        r2 = "analysis/trim/{id}_val_2.fq.gz",
+        vector = "analysis/vector/middle.fna"
     output:
-        "analysis/spades/{id}/scaffolds.fasta"
+        r1 = "analysis/vector_trim/{id}_R1.fastq.gz",
+        r2 = "analysis/vector_trim/{id}_R2.fastq.gz",
+        tmp1 = temp("analysis/vector_trim/{id}_too_short_R1.fastq.gz"),
+        tmp2 = temp("analysis/vector_trim/{id}_too_short_R2.fastq.gz")
     params:
-        dirname = "analysis/spades/{id}"
-    threads:
-        4
+        min_len = 50
+    log:
+        "analysis/vector_trim/{id}.log"
     conda:
-        "envs/spades.yaml"
+        "envs/tools.yaml"
+    threads:
+        10
     shell:
-        "spades.py -t {threads} -1 {input.r1} -2 {input.r2} -o {params.dirname}"
+        "cutadapt -j {threads} -b file:{input.vector} -B file:{input.vector} -m {params.min_len} -o {output.r1} -p {output.r2} --too-short-output {output.tmp1} --too-short-paired-output {output.tmp2} {input.r1} {input.r2} &> {log}"
 
-rule longest_scaffold:
+rule vector_illumina_unpaired:
     input:
-        fasta = "analysis/spades/{id}/scaffolds.fasta",
-        fw = "workflow/metadata/vector_fw.fna",
-        rv = "workflow/metadata/vector_rv.fna"
+        "analysis/vector_trim/{id}_too_short_R1.fastq.gz",
+        "analysis/vector_trim/{id}_too_short_R2.fastq.gz"
     output:
-        fasta = "analysis/fosmids/{id}.fna",
-        info  = "analysis/fosmids/{id}.info"
+        "analysis/vector_trim/{id}_U.fastq.gz"
+    params:
+        min_len = 50
     conda:
         "envs/tools.yaml"
     shell:
-        "seqkit head -n1 {input} | cutadapt --times 4 --rc --report=minimal --info-file {output.info} -g file:{input.fw} -a file:{input.rv} - > {output.fasta}"
+        "seqkit seq -m {params.min_len} -o {output.unpaired} {input}"
 
-rule copy_submol:
+def vector_nanopore_find_input(wildcards):
+    id = wildcards.id
+    i = int(wildcards.i)
+    return f"raw/{metadata[id]['nanopore']}" if i == 1 else f"analysis/vector_trim/{id}_{i-1}_trimmed.fastq.gz"
+
+rule vector_nanopore_find:
     input:
-        "workflow/metadata/submol.yaml"
+        fastq = vector_nanopore_find_input,
+        vector = "analysis/vector/middle.fna"
+    output:
+        "analysis/vector_trim/{id}_{i}.tsv"
+    log:
+        "analysis/vector_trim/{id}_{i}.log"
+    conda:
+        "envs/tools.yaml"
+    threads:
+        10
+    shell:
+        "cutadapt -j {threads} --rc -b file:{input.vector} --info-file {output} -o /dev/null {input.fastq} &> {log}"
+
+checkpoint vector_nanopore_trim:
+    input:
+        "analysis/vector_trim/{id}_{i}.tsv"
+    output:
+        trimmed = "analysis/vector_trim/{id}_{i}_trimmed.fastq.gz",
+        passed = "analysis/vector_trim/{id}_{i}_passed.fastq.gz"
+    params:
+        min_len = 200
+    conda:
+        "envs/python.yaml"
+    script:
+        "scripts/vector_nanopore_trim.py"
+
+rule vector_middle:
+    input:
+        "workflow/metadata/vector.fna"
+    output:
+        "analysis/vector/middle.fna"
+    params:
+        flanks = 2000
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "seqkit subseq -r {params.flanks}:-{params.flanks} -o {output} {input}"
+
+def flye_input(wildcards):
+    files = []
+    for i in range(1, 100):
+        trim_output = checkpoints.vector_nanopore_trim.get(id = wildcards.id, i = i).output
+        with gzip.open(trim_output.trimmed, 'rb') as f:
+            if not f.read(1): break
+        files.append(trim_output.passed)
+    return files
+
+rule flye:
+    input:
+        flye_input
+    output:
+        directory("analysis/flye/{id}")
+    log:
+        "analysis/flye/{id}.log"
+    threads:
+        10
+    conda:
+        "envs/flye.yaml"
+    shell:
+        "flye --nano-raw {input} --out-dir {output} --threads {threads} &> {log}"
+
+rule spades:
+    input:
+        r1 = "analysis/vector_trim/{id}_R1.fastq.gz",
+        r2 = "analysis/vector_trim/{id}_R2.fastq.gz",
+        U = "analysis/vector_trim/{id}_U.fastq.gz"
+    output:
+        directory("analysis/spades/{id}")
+    threads:
+        10
+    conda:
+        "envs/spades.yaml"
+    shell:
+        "spades.py -t {threads} -1 {input.r1} -2 {input.r2} -o {output}"
+
+def choose_assembly(wildcards):
+    id = wildcards.id
+    fosmid = metadata[id]
+    if fosmid['illumina1']:
+        return "analysis/spades/{id}/scaffolds.fasta"
+    if fosmid['nanopore']:
+        return "analysis/flye/{id}/assembly.fasta"
+    if fosmid['pre_assembled']:
+        return Path("pre_assembled") / fosmid['pre_assembled']
+    raise ValueError(f"Unrecognized assembly source: '{assembly}'. Expected 'spades', 'flye' or a file in directory assembly/")
+
+rule trim_vector_from_assembly:
+    input:
+        contigs = choose_assembly,
+        vector = "workflow/metadata/vector.fna"
+    output:
+        fasta = "analysis/fosmids/{id}.fna",
+        info = "analysis/fosmids/{id}.info"
+    log:
+        "analysis/fosmids/{id}.info.log"
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "cutadapt -n 10 --rc -g file:{input.vector} -a file:{input.vector} -o {output.fasta} --info-file {output.info} {input.contigs} &> {log}"
+
+rule make_submol:
     output:
         "analysis/fosmids/{id}_submol.yaml"
-    shell:
-        "cp {input} {output}"
+    run:
+        submol = {
+            "topology": 'linear',
+            "organism": { "genus_species": metadata[wildcards.id]["ref_organism"] if metadata[wildcards.id]["ref_organism"] else DEFAULT_ORGANISM },
+            "locus_tag_prefix": metadata[wildcards.id]["prefix"]
+        }
+        with open(output[0], "w") as fd:
+            yaml.safe_dump(submol, fd, sort_keys=False)
 
 rule make_yaml:
     input:
@@ -77,36 +212,112 @@ rule make_yaml:
     output:
         "analysis/fosmids/{id}.yaml"
     run:
-        sets = dict(
-            fasta  = { "class": "File", "location": basename(input.fasta)  },
-            submol = { "class": "File", "location": basename(input.submol) }
-        )
+        sets = {
+            "fasta": { "class": "File", "location": basename(input.fasta) },
+            "submol": { "class": "File", "location": basename(input.submol) }
+        }
         with open(output[0], 'w') as fd:
             yaml.dump(sets, fd)
 
 rule pgap:
     input:
+        fasta  = "analysis/fosmids/{id}.fna",
         yaml = "analysis/fosmids/{id}.yaml",
         submol = "analysis/fosmids/{id}_submol.yaml"
     output:
-        "analysis/pgap/{id}/annot.gbk"
-    params:
-        dirname = "analysis/pgap/{id}"
+        directory("analysis/pgap/{id}")
+    log:
+        "analysis/pgap/{id}.log"
     threads:
         8
     shell:
-        """
-        rm -r {params.dirname}
-        pgap.py --debug --ignore-all-errors --report-usage-true --cpu {threads} -o {params.dirname} {input.yaml}
-        """
+        "pgap.py --debug --ignore-all-errors --report-usage-true --cpu {threads} -o {output} {input.yaml} &> {log}"
 
 rule gbf2tbl:
     input:
-        script = "workflow/tools/gbf2tbl.pl",
-        pgap   = "analysis/pgap/{id}/annot.gbk"
+        gbf2tbl = "analysis/tools/gbf2tbl.pl",
+        gbk = "output/{id}/{id}.gbk"
     output:
-        "analysis/pgap/{id}/annot.tbl"
+        "output/{id}/{id}.tbl"
     conda:
         "envs/perl.yaml"
     shell:
-        "perl {input.script} {input.pgap}"
+        "perl {input.gbf2tbl} {input.gbk}"
+
+rule final_gbk:
+    input:
+        "analysis/pgap/{id}"
+    output:
+        "output/{id}/{id}.gbk"
+    params:
+        organism = lambda w: metadata[w.id]['organism'],
+        prefix = lambda w: metadata[w.id]['prefix']
+    conda:
+        "envs/python.yaml"
+    script:
+        "scripts/final_gbk.py"
+
+rule blastn:
+    input:
+        "analysis/fosmids/{id}.fna"
+    output:
+        "analysis/blastn/{id}/{db_dir}_{db_prefixes}.txt"
+    params:
+        db = "databases/{db_dir}/{db_prefixes}",
+        outfmt = "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle",
+        num = 10
+    conda:
+        "envs/blast.yaml"
+    threads:
+        10
+    shell:
+        "blastn -query {input} -db {params.db} -out {output} -outfmt '{params.outfmt}' -num_threads {threads} -max_target_seqs {params.num}"
+
+rule tblastn:
+    input:
+        "analysis/pgap/{id}"
+    output:
+        "analysis/tblastn/{id}/{db_dir}_{db_prefixes}.txt"
+    params:
+        db = "databases/{db_dir}/{db_prefixes}",
+        outfmt = "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle",
+        num = 10
+    conda:
+        "envs/blast.yaml"
+    threads:
+        10
+    shell:
+        "tblastn -query {input}/annot.faa -db {params.db} -out {output} -outfmt '{params.outfmt}' -num_threads {threads} -max_target_seqs {params.num}"
+
+def metabuli_output(wildcards, output):
+    path = Path(output[0])
+    return path.parent, path.name.replace('_classifications.tsv', '')
+
+rule metabuli:
+    input:
+        pgap = "analysis/pgap/{id}"
+    output:
+        "output/{id}/{id}_classifications.tsv"
+    params:
+        fasta = "analysis/pgap/{id}/annot_cds_from_genomic.fna",
+        db_dir = "/data/metabuli/gtdb226db",
+        out = metabuli_output
+    conda:
+        "envs/metabuli.yaml"
+    threads:
+        20
+    shell:
+        "metabuli classify --lineage 1 --seq-mode 1 --threads {threads} {params.fasta} {params.db_dir} {params.out}"
+
+# not implemented
+rule report:
+    input:
+        tblastn = expand("analysis/tblastn/{{id}}/{db_dir}_{db_prefix}.txt", zip, db_dir = db_dirs, db_prefix = db_prefixes),
+        genbank = "output/{id}/{id}.gbk",
+        vector = "analysis/fosmids/{id}.info"
+    output:
+        "output/{id}.xlsx"
+    conda:
+        "envs/python.yaml"
+    script:
+        "scripts/report.py"
