@@ -1,7 +1,8 @@
 import gzip
-from Bio import SeqIO
 import yaml
 import pandas as pd
+import shutil
+import sqlite3
 from pathlib import Path
 import warnings
 
@@ -10,7 +11,6 @@ if not config:
 SAMPLES_FILE = config.get("samples_file", "config/samples.xlsx")
 
 GTDB_PATH = config["gtdb_path"]
-DEFAULT_ORGANISM = config["default_organism"]
 MIN_CONTIG = config["min_contig"]
 
 with warnings.catch_warnings():
@@ -23,6 +23,47 @@ enzymes = samples_df['enzyme'].unique().tolist()
 samples = samples_df.where(samples_df.notnull(), None).set_index('id').to_dict(orient='index')
 
 fosmids = list(samples.keys())
+
+# --- PGAP taxonomy validation ---
+def get_pgap_taxonomy_path():
+    install_dir = Path(os.getenv('PGAP_INPUT_DIR', Path.home() / '.pgap'))
+    if not install_dir.exists():
+        raise FileNotFoundError("PGAP data directory not found")
+    version_file = install_dir / 'VERSION'
+    if not version_file.exists():
+        raise FileNotFoundError("PGAP's VERSION file not found")
+    version = version_file.read_text(encoding='utf-8').strip()
+    db_path = install_dir / f"input-{version}" / "uniColl_path" / "taxonomy.sqlite3"
+    if not db_path.exists():
+        raise FileNotFoundError("PGAP's taxonomy database file not found")
+    return db_path
+
+def check_organism(organism, tax_conn):
+    organism = str(organism).strip()
+    if not organism or organism.lower() == "nan":
+        raise ValueError("Organism must be non-empty.")
+    cur = tax_conn.cursor()
+    rows = cur.execute("SELECT rank, org_ref_asn FROM TaxidInfo WHERE scientific_name = ?", (organism,)).fetchall()
+    if not rows:
+        raise ValueError(f"Organism '{organism}' was not found in PGAP taxonomy.")
+    if len(rows) > 1:
+        raise ValueError(f"Organism '{organism}' has multiple matches in PGAP taxonomy.")
+    rank, org_ref_asn = rows[0]
+    if rank != 'species':
+        raise ValueError(f"Organism '{organism}' must be a species, got '{rank}' instead.")
+    if match := re.search(r'lineage\s+"([^"]+)"', org_ref_asn):
+        ancestor = match.group(1).split(';')[0]
+        if ancestor not in ("Bacteria", "Archaea"):
+            raise ValueError(f"Organism '{organism}' must be a bacterium or an archaeon, it belongs instead to '{ancestor}'")
+    else:
+        raise ValueError(f"Unexpected format of org_ref_asn: '{org_ref_asn}'.")
+
+tax_db_path = get_pgap_taxonomy_path()
+
+with sqlite3.connect(tax_db_path) as tax_conn:
+    for org in samples_df['organism'].unique():
+        check_organism(org, tax_conn)
+# --------------------------------------------
 
 wildcard_constraints:
     id = '|'.join(fosmids),
@@ -269,12 +310,14 @@ rule trim_vector_from_assembly:
 rule make_submol:
     output:
         "analysis/fosmids/{id}_submol.yaml"
+    params:
+        organism = lambda w: samples[w.id]["organism"],
+        isolate = lambda w: samples[w.id]["isolate"],
+        prefix = lambda w: samples[w.id]["prefix"]
     run:
-        submol = {
-            "topology": 'linear',
-            "organism": { "genus_species": samples[wildcards.id]["ref_organism"] if samples[wildcards.id]["ref_organism"] else DEFAULT_ORGANISM },
-            "locus_tag_prefix": samples[wildcards.id]["prefix"]
-        }
+        submol = { "topology": 'linear', "organism": { "genus_species": params.organism }, "locus_tag_prefix": params.prefix }
+        if params.isolate and not pd.isna(params.isolate):
+            submol["organism"]["strain"] = params.isolate
         with open(output[0], "w") as fd:
             yaml.safe_dump(submol, fd, sort_keys=False)
 
@@ -425,7 +468,6 @@ rule final_output:
         gbk = "output/{id}/{id}.gbk",
         report = "output/{id}/report.xlsx"
     params:
-        organism = lambda w: samples[w.id]['organism'],
         prefix = lambda w: samples[w.id]['prefix'],
         read_mode = coverage_read_mode
     conda:

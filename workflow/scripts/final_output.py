@@ -48,7 +48,7 @@ def update_locus_line(record: SeqRecord, prefix: str) -> str:
     return with_prefix(old_locus, prefix)
 
 
-def transform_genbank(records: list[SeqRecord], organism: str, prefix: str) -> list[SeqRecord]:
+def transform_genbank(records: list[SeqRecord], prefix: str) -> list[SeqRecord]:
     transformed: list[SeqRecord] = []
     for record in records:
         new_locus = update_locus_line(record, prefix)
@@ -56,23 +56,7 @@ def transform_genbank(records: list[SeqRecord], organism: str, prefix: str) -> l
         record.name = new_locus
         record.description = new_locus
 
-        record.annotations["organism"] = organism
-        record.annotations["source"] = organism
-        record.annotations["taxonomy"] = []
         record.annotations["references"] = []
-
-        for feature in record.features:
-            if "organism" in feature.qualifiers:
-                feature.qualifiers["organism"] = [organism]
-            if "source" in feature.qualifiers:
-                feature.qualifiers["source"] = [organism]
-            if "db_xref" in feature.qualifiers:
-                feature.qualifiers["db_xref"] = [
-                    v for v in feature.qualifiers["db_xref"] if not str(v).startswith("taxon:")
-                ]
-                if not feature.qualifiers["db_xref"]:
-                    del feature.qualifiers["db_xref"]
-
         transformed.append(record)
 
     return transformed
@@ -226,7 +210,7 @@ def build_annotation_sheet(records: list, prefix: str) -> pd.DataFrame:
         rows.append(
             {
                 "Contig": "",
-                "Key": "Reference organism",
+                "Key": "Organism",
                 "Value": annotation_value_text(record.annotations.get("organism", "")),
             }
         )
@@ -394,13 +378,12 @@ sample_id = str(snakemake.wildcards.id)
 
 output_gbk = snakemake.output.gbk
 output_report = snakemake.output.report
-organism = snakemake.params.organism
 prefix = snakemake.params.prefix
 read_mode = str(getattr(snakemake.params, "read_mode", "none"))
 
 in_gbk = Path(input_dir) / "annot.gbk"
 original_records = list(SeqIO.parse(in_gbk, "genbank"))
-transformed_records = transform_genbank(list(SeqIO.parse(in_gbk, "genbank")), organism=organism, prefix=prefix)
+transformed_records = transform_genbank(list(SeqIO.parse(in_gbk, "genbank")), prefix=prefix)
 SeqIO.write(transformed_records, output_gbk, "genbank")
 
 assembly_df = build_assembly_sheet(trim_info, pretrim_fasta, trimmed_fasta, vector_fasta)

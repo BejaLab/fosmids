@@ -1,3 +1,3 @@
 gtdb_path: /data/metabuli/gtdb226db
-default_organism: Escherichia coli
+default_organism: "uncultured bacterium"
 min_contig: 2000
