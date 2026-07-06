@@ -38,6 +38,19 @@ Default final targets:
 - `output/{id}/{id}.gbk`
 - `output/{id}/report.xlsx` with sheets: `Assembly`, `Annotation`, `Classification`, `Genes`, `Vector`
 
+How to create an instance
+-------------------------
+
+```bash
+snakedeploy deploy-workflow https://github.com/BejaLab/fosmids my_new_fosmid_project --branch main
+```
+
+or 
+
+```bash
+snakedeploy deploy-workflow https://github.com/BejaLab/fosmids my_new_fosmid_project --tag v1.0.0 # or another one of https://github.com/BejaLab/fosmids/tags
+```
+
 How to run
 ----------
 
