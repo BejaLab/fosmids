@@ -86,7 +86,6 @@ def vector_iteration_stats(sample_id: str, read_mode: str, flye_inputs: list[str
     default = "NA"
     if read_mode != "nanopore" or not flye_inputs:
         return default
-    print(flye_inputs)
     return str(len(flye_inputs) - 1)
 
 
