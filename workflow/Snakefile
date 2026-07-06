@@ -5,10 +5,9 @@ import pandas as pd
 from pathlib import Path
 import warnings
 
-SAMPLES_FILE = "config/samples.xlsx"
-CONFIG_FILE = "config/config.yaml"
-
-configfile: CONFIG_FILE
+if not config:
+    configfile: "config/config.yaml"
+SAMPLES_FILE = config.get("samples_file", "config/samples.xlsx")
 
 GTDB_PATH = config["gtdb_path"]
 DEFAULT_ORGANISM = config["default_organism"]

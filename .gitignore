@@ -7,3 +7,5 @@ pre_assembled/
 log
 *.log
 __pycache__/
+debug/
+submission/
