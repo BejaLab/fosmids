@@ -3,10 +3,10 @@ BejaLab fosmid assembly and annotation pipeline
 
 This repository contains a Snakemake workflow for fosmid processing from reads or pre-assembled contigs.
 
-Input metadata (`fosmids.xlsx`)
--------------------------------
+Input data
+----------
 
-The workflow reads `fosmids.xlsx` (sheet header) with columns:
+The workflow reads `config/samples.xlsx` with columns:
 
 - `id`: sample identifier (used in output paths).
 - `illumina1`, `illumina2`: paired-end read files relative to `raw/`.
@@ -28,7 +28,7 @@ Depending on available inputs, the workflow performs:
 
 - read trimming for Illumina data
 - vector filtering on reads using a middle region of the vector
-- assembly (`spades.py` or `flye`)
+- assembly (`spades` or `flye`)
 - vector trimming from assembled contigs
 - PGAP annotation
 - taxonomy classification with Metabuli (`metabuli classify`)
@@ -36,19 +36,19 @@ Depending on available inputs, the workflow performs:
 Default final targets:
 
 - `output/{id}/{id}.gbk`
-- `output/{id}/{id}_classifications.tsv`
+- `output/{id}/report.xlsx` with sheets: `Assembly`, `Annotation`, `Classification`, `Genes`, `Vector`
 
 How to run
 ----------
 
-1. Fill `fosmids.xlsx`.
+1. Fill `config/samples.xlsx`.
 2. Place input files in `raw/` and/or `pre_assembled/` according to metadata.
-3. Run Snakemake (profile enables Conda + Apptainer):
+3. Run Snakemake (profile enables Conda):
 
 ```bash
 snakemake
 ```
 
 ```bash
-snakemake --use-conda --use-apptainer --cores 10
+snakemake --use-conda --cores 10
 ```

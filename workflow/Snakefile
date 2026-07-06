@@ -1,34 +1,39 @@
 import gzip
-
 from Bio import SeqIO
 import yaml
 import pandas as pd
-from os.path import basename
+from pathlib import Path
 import warnings
 
-METADATA_FILE = "fosmids.xlsx"
-DEFAULT_ORGANISM = "Escherichia coli"
+SAMPLES_FILE = "config/samples.xlsx"
+CONFIG_FILE = "config/config.yaml"
+
+configfile: CONFIG_FILE
+
+GTDB_PATH = config["gtdb_path"]
+DEFAULT_ORGANISM = config["default_organism"]
+MIN_CONTIG = config["min_contig"]
 
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", category = UserWarning, module = re.escape("openpyxl.styles.stylesheet"))
-    metadata_df = pd.read_excel(METADATA_FILE, dtype = str, engine = "openpyxl")
+    samples_df = pd.read_excel(SAMPLES_FILE, dtype = str, engine = "openpyxl")
 
-metadata = metadata_df.where(metadata_df.notnull(), None).set_index('id').to_dict(orient='index')
+samples_df['vector_name'] = samples_df['vector'].apply(lambda x: Path(x).stem)
+vectors = samples_df.drop_duplicates(subset=['vector_name']).set_index('vector_name')['vector'].to_dict()
+enzymes = samples_df['enzyme'].unique().tolist()
+samples = samples_df.where(samples_df.notnull(), None).set_index('id').to_dict(orient='index')
 
-fosmids = list(metadata.keys())
-
-db_dirs, db_prefixes ,= glob_wildcards("databases/{dir}/{prefix}.ndb")
+fosmids = list(samples.keys())
 
 wildcard_constraints:
     id = '|'.join(fosmids),
-    db_dir = '|'.join(db_dirs),
-    db_prefix = '|'.join(db_prefixes)
+    vector = '|'.join(vectors),
+    enzyme = '|'.join(enzymes)
 
 rule all:
     input:
-        expand("output/{id}/{id}.gbk", id = fosmids),
-        expand("output/{id}/{id}_classifications.tsv", id = fosmids)
-        #expand(expand("analysis/tblastn/{{id}}/{db_dir}_{db_prefix}.txt", zip, db_dir = db_dirs, db_prefix = db_prefixes), id = fosmids)
+        expand("output/{id}/{id}.{ext}", id = fosmids, ext = [ 'gbk', 'fsa', 'tbl' ]),
+        expand("output/{id}/report.xlsx", id = fosmids)
 
 rule dload_gbf2tbl:
     output:
@@ -38,25 +43,55 @@ rule dload_gbf2tbl:
     shell:
         "wget -qO {output} {params.url}"
 
+rule dload_vector:
+    output:
+        "analysis/vectors/{vector}.gbk"
+    params:
+        url = lambda w: vectors[w.vector]
+    shell:
+        "wget -qO {output} {params.url}"
+
+rule vector_cut:
+    output:
+        "analysis/vectors/{vector}_{enzyme}.fna"
+    params:
+        url = lambda w: vectors[w.vector]
+    conda:
+        "envs/python.yaml"
+    script:
+        "scripts/vector_cut.py"
+
 rule trim_paired:
     input:
-        r1 = lambda w: f"raw/{metadata[w.id]['illumina1']}",
-        r2 = lambda w: f"raw/{metadata[w.id]['illumina2']}"
+        r1 = lambda w: f"raw/{samples[w.id]['illumina1']}",
+        r2 = lambda w: f"raw/{samples[w.id]['illumina2']}"
     output:
         r1 = "analysis/trim/{id}_val_1.fq.gz",
         r2 = "analysis/trim/{id}_val_2.fq.gz"
+    log:
+        "logs/trim_paired/{id}.log"
     params:
         dirname = "analysis/trim"
     conda:
         "envs/tools.yaml"
     shell:
-        "trim_galore --paired {input} --basename {wildcards.id} --output_dir {params.dirname}"
+        "trim_galore --paired {input} --basename {wildcards.id} --output_dir {params.dirname} &> {log}"
+
+def vector_middle_for_fosmid(wildcards):
+    vector_name = samples[wildcards.id]['vector_name']
+    enzyme = samples[wildcards.id]['enzyme']
+    return f"analysis/vectors/{vector_name}_{enzyme}_middle.fna"
+
+def vector_complete_for_fosmid(wildcards):
+    vector_name = samples[wildcards.id]['vector_name']
+    enzyme = samples[wildcards.id]['enzyme']
+    return f"analysis/vectors/{vector_name}_{enzyme}.fna"
 
 rule vector_illumina_trim:
     input:
         r1 = "analysis/trim/{id}_val_1.fq.gz",
         r2 = "analysis/trim/{id}_val_2.fq.gz",
-        vector = "analysis/vector/middle.fna"
+        vector = vector_middle_for_fosmid
     output:
         r1 = "analysis/vector_trim/{id}_R1.fastq.gz",
         r2 = "analysis/vector_trim/{id}_R2.fastq.gz",
@@ -65,7 +100,7 @@ rule vector_illumina_trim:
     params:
         min_len = 50
     log:
-        "analysis/vector_trim/{id}.log"
+        "log/vector_trim/{id}.log"
     conda:
         "envs/tools.yaml"
     threads:
@@ -84,27 +119,29 @@ rule vector_illumina_unpaired:
     conda:
         "envs/tools.yaml"
     shell:
-        "seqkit seq -m {params.min_len} -o {output.unpaired} {input}"
+        "seqkit seq -gm {params.min_len} -o {output} {input}"
 
 def vector_nanopore_find_input(wildcards):
     id = wildcards.id
-    i = int(wildcards.i)
-    return f"raw/{metadata[id]['nanopore']}" if i == 1 else f"analysis/vector_trim/{id}_{i-1}_trimmed.fastq.gz"
+    i = int(wildcards.get('i', 1))
+    return f"raw/{samples[id]['nanopore']}" if i == 1 else f"analysis/vector_trim/{id}_{i-1}_trimmed.fastq.gz"
 
 rule vector_nanopore_find:
     input:
         fastq = vector_nanopore_find_input,
-        vector = "analysis/vector/middle.fna"
+        vector = vector_middle_for_fosmid
     output:
         "analysis/vector_trim/{id}_{i}.tsv"
+    params:
+        min_overlap = 200
     log:
-        "analysis/vector_trim/{id}_{i}.log"
+        "logs/vector_trim/{id}_{i}.log"
     conda:
         "envs/tools.yaml"
     threads:
         10
     shell:
-        "cutadapt -j {threads} --rc -b file:{input.vector} --info-file {output} -o /dev/null {input.fastq} &> {log}"
+        "cutadapt -j {threads} -O {params.min_overlap} --rc -b file:{input.vector} --info-file {output} -o /dev/null {input.fastq} &> {log}"
 
 checkpoint vector_nanopore_trim:
     input:
@@ -121,9 +158,9 @@ checkpoint vector_nanopore_trim:
 
 rule vector_middle:
     input:
-        "workflow/metadata/vector.fna"
+        "analysis/vectors/{vector}_{enzyme}.fna"
     output:
-        "analysis/vector/middle.fna"
+        "analysis/vectors/{vector}_{enzyme}_middle.fna"
     params:
         flanks = 2000
     conda:
@@ -135,24 +172,56 @@ def flye_input(wildcards):
     files = []
     for i in range(1, 100):
         trim_output = checkpoints.vector_nanopore_trim.get(id = wildcards.id, i = i).output
+        files.append(trim_output.passed)
         with gzip.open(trim_output.trimmed, 'rb') as f:
             if not f.read(1): break
-        files.append(trim_output.passed)
     return files
 
-rule flye:
+rule flye_with_vector:
     input:
-        flye_input
+        vector_nanopore_find_input
     output:
-        directory("analysis/flye/{id}")
+        out_dir = directory("analysis/flye_with_vector/{id}"),
+        out_fasta = "analysis/flye_with_vector/{id}/assembly.fasta"
     log:
-        "analysis/flye/{id}.log"
+        "logs/flye_with_vector/{id}.log"
     threads:
         10
     conda:
         "envs/flye.yaml"
     shell:
-        "flye --nano-raw {input} --out-dir {output} --threads {threads} &> {log}"
+        "flye --nano-raw {input} --out-dir {output.out_dir} --threads {threads} &> {log}"
+
+rule flye:
+    input:
+        flye_input
+    output:
+        out_dir = directory("analysis/flye/{id}"),
+        out_fasta = "analysis/flye/{id}/assembly.fasta"
+    log:
+        "logs/flye/{id}.log"
+    threads:
+        10
+    conda:
+        "envs/flye.yaml"
+    shell:
+        "flye --nano-raw {input} --out-dir {output.out_dir} --threads {threads} &> {log}"
+
+rule spades_with_vector:
+    input:
+        r1 = "analysis/trim/{id}_val_1.fq.gz",
+        r2 = "analysis/trim/{id}_val_2.fq.gz"
+    output:
+        out_dir = directory("analysis/spades_with_vector/{id}"),
+        out_fasta = "analysis/spades_with_vector/{id}/scaffolds.fasta"
+    log:
+        "logs/spades_with_vector/{id}.log"
+    threads:
+        10
+    conda:
+        "envs/spades.yaml"
+    shell:
+        "spades.py -t {threads} -1 {input.r1} -2 {input.r2} -o {output.out_dir} &> {log}"
 
 rule spades:
     input:
@@ -160,17 +229,20 @@ rule spades:
         r2 = "analysis/vector_trim/{id}_R2.fastq.gz",
         U = "analysis/vector_trim/{id}_U.fastq.gz"
     output:
-        directory("analysis/spades/{id}")
+        out_dir = directory("analysis/spades/{id}"),
+        out_fasta = "analysis/spades/{id}/scaffolds.fasta"
+    log:
+        "logs/spades/{id}.log"
     threads:
         10
     conda:
         "envs/spades.yaml"
     shell:
-        "spades.py -t {threads} -1 {input.r1} -2 {input.r2} -o {output}"
+        "spades.py -t {threads} -1 {input.r1} -2 {input.r2} -s {input.U} -o {output.out_dir} &> {log}"
 
 def choose_assembly(wildcards):
     id = wildcards.id
-    fosmid = metadata[id]
+    fosmid = samples[id]
     if fosmid['illumina1']:
         return "analysis/spades/{id}/scaffolds.fasta"
     if fosmid['nanopore']:
@@ -182,16 +254,18 @@ def choose_assembly(wildcards):
 rule trim_vector_from_assembly:
     input:
         contigs = choose_assembly,
-        vector = "workflow/metadata/vector.fna"
+        vector = vector_complete_for_fosmid
     output:
         fasta = "analysis/fosmids/{id}.fna",
         info = "analysis/fosmids/{id}.info"
+    params:
+        m = MIN_CONTIG
     log:
-        "analysis/fosmids/{id}.info.log"
+        "logs/trim_vector_from_assembly/{id}.log"
     conda:
         "envs/tools.yaml"
     shell:
-        "cutadapt -n 10 --rc -g file:{input.vector} -a file:{input.vector} -o {output.fasta} --info-file {output.info} {input.contigs} &> {log}"
+        "cutadapt -n 10 -m {params.m} --rc -g file:{input.vector} -a file:{input.vector} -o {output.fasta} --info-file {output.info} {input.contigs} &> {log}"
 
 rule make_submol:
     output:
@@ -199,8 +273,8 @@ rule make_submol:
     run:
         submol = {
             "topology": 'linear',
-            "organism": { "genus_species": metadata[wildcards.id]["ref_organism"] if metadata[wildcards.id]["ref_organism"] else DEFAULT_ORGANISM },
-            "locus_tag_prefix": metadata[wildcards.id]["prefix"]
+            "organism": { "genus_species": samples[wildcards.id]["ref_organism"] if samples[wildcards.id]["ref_organism"] else DEFAULT_ORGANISM },
+            "locus_tag_prefix": samples[wildcards.id]["prefix"]
         }
         with open(output[0], "w") as fd:
             yaml.safe_dump(submol, fd, sort_keys=False)
@@ -213,8 +287,8 @@ rule make_yaml:
         "analysis/fosmids/{id}.yaml"
     run:
         sets = {
-            "fasta": { "class": "File", "location": basename(input.fasta) },
-            "submol": { "class": "File", "location": basename(input.submol) }
+            "fasta": { "class": "File", "location": Path(input.fasta).name },
+            "submol": { "class": "File", "location": Path(input.submol).name }
         }
         with open(output[0], 'w') as fd:
             yaml.dump(sets, fd)
@@ -227,7 +301,7 @@ rule pgap:
     output:
         directory("analysis/pgap/{id}")
     log:
-        "analysis/pgap/{id}.log"
+        "logs/pgap/{id}.log"
     threads:
         8
     shell:
@@ -238,86 +312,124 @@ rule gbf2tbl:
         gbf2tbl = "analysis/tools/gbf2tbl.pl",
         gbk = "output/{id}/{id}.gbk"
     output:
-        "output/{id}/{id}.tbl"
+        tbl = "output/{id}/{id}.tbl",
+        fas = "output/{id}/{id}.fsa"
     conda:
         "envs/perl.yaml"
     shell:
         "perl {input.gbf2tbl} {input.gbk}"
 
-rule final_gbk:
-    input:
-        "analysis/pgap/{id}"
-    output:
-        "output/{id}/{id}.gbk"
-    params:
-        organism = lambda w: metadata[w.id]['organism'],
-        prefix = lambda w: metadata[w.id]['prefix']
-    conda:
-        "envs/python.yaml"
-    script:
-        "scripts/final_gbk.py"
-
-rule blastn:
-    input:
-        "analysis/fosmids/{id}.fna"
-    output:
-        "analysis/blastn/{id}/{db_dir}_{db_prefixes}.txt"
-    params:
-        db = "databases/{db_dir}/{db_prefixes}",
-        outfmt = "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle",
-        num = 10
-    conda:
-        "envs/blast.yaml"
-    threads:
-        10
-    shell:
-        "blastn -query {input} -db {params.db} -out {output} -outfmt '{params.outfmt}' -num_threads {threads} -max_target_seqs {params.num}"
-
-rule tblastn:
-    input:
-        "analysis/pgap/{id}"
-    output:
-        "analysis/tblastn/{id}/{db_dir}_{db_prefixes}.txt"
-    params:
-        db = "databases/{db_dir}/{db_prefixes}",
-        outfmt = "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle",
-        num = 10
-    conda:
-        "envs/blast.yaml"
-    threads:
-        10
-    shell:
-        "tblastn -query {input}/annot.faa -db {params.db} -out {output} -outfmt '{params.outfmt}' -num_threads {threads} -max_target_seqs {params.num}"
-
 def metabuli_output(wildcards, output):
-    path = Path(output[0])
-    return path.parent, path.name.replace('_classifications.tsv', '')
+    path = Path(output.report)
+    return path.parent, path.name.replace('_report.tsv', '')
 
 rule metabuli:
     input:
-        pgap = "analysis/pgap/{id}"
+        "analysis/pgap/{id}"
     output:
-        "output/{id}/{id}_classifications.tsv"
+        classifications = "analysis/metabuli/{id}_classifications.tsv",
+        report = "analysis/metabuli/{id}_report.tsv"
+    log:
+        "logs/metabuli/{id}.log"
     params:
-        fasta = "analysis/pgap/{id}/annot_cds_from_genomic.fna",
-        db_dir = "/data/metabuli/gtdb226db",
+        fasta = lambda w, input: f"{input}/annot_cds_from_genomic.fna",
+        db_dir = GTDB_PATH,
         out = metabuli_output
     conda:
         "envs/metabuli.yaml"
     threads:
         20
     shell:
-        "metabuli classify --lineage 1 --seq-mode 1 --threads {threads} {params.fasta} {params.db_dir} {params.out}"
+        "metabuli classify --lineage 1 --seq-mode 1 --threads {threads} {params.fasta} {params.db_dir} {params.out} &> {log}"
 
-# not implemented
-rule report:
+def coverage_read_mode(wildcards):
+    id = wildcards.id
+    if samples[id]['illumina1']:
+        return "illumina"
+    if samples[id]['nanopore']:
+        return "nanopore"
+    return "none"
+
+def coverage_insert_depth_output(wildcards):
+    mode = coverage_read_mode(wildcards)
+    if mode == "none":
+        return None
+    return f"analysis/coverage/{wildcards.id}_{mode}.insert.depth.tsv"
+
+def coverage_vector_depth_output(wildcards):
+    mode = coverage_read_mode(wildcards)
+    if mode == "none":
+        return None
+    return f"analysis/coverage/{wildcards.id}_{mode}.vector.depth.tsv"
+
+# Helper function to determine the reference file based on the wildcard
+def get_reference(wildcards):
+    if wildcards.ref_type == "insert":
+        return f"analysis/fosmids/{wildcards.id}.fna"
+    elif wildcards.ref_type == "vector":
+        return vector_complete_for_fosmid(wildcards)
+
+rule align_illumina:
     input:
-        tblastn = expand("analysis/tblastn/{{id}}/{db_dir}_{db_prefix}.txt", zip, db_dir = db_dirs, db_prefix = db_prefixes),
-        genbank = "output/{id}/{id}.gbk",
-        vector = "analysis/fosmids/{id}.info"
+        ref = get_reference,
+        r1 = lambda w: f"raw/{samples[w.id]['illumina1']}",
+        r2 = lambda w: f"raw/{samples[w.id]['illumina2']}"
     output:
-        "output/{id}.xlsx"
+        "analysis/coverage/{id}_illumina.{ref_type}.bam"
+    log:
+        "analysis/coverage/{id}_illumina.{ref_type}.log"
+    conda:
+        "envs/mapping.yaml"
+    threads:
+        10
+    shell:
+        "(minimap2 -ax sr -t {threads} {input.ref} {input.r1} {input.r2} | samtools sort -o {output} -) &> {log}"
+
+rule align_nanopore:
+    input:
+        ref = get_reference,
+        fastq = lambda w: f"raw/{samples[w.id]['nanopore']}"
+    output:
+        "analysis/coverage/{id}_nanopore.{ref_type}.bam"
+    log:
+        "analysis/coverage/{id}_nanopore.{ref_type}.log"
+    conda:
+        "envs/mapping.yaml"
+    threads:
+        10
+    shell:
+        "(minimap2 -ax map-ont -t {threads} {input.ref} {input.fastq} | samtools sort -o {output} -) &> {log}"
+
+rule calculate_depth:
+    input:
+        "analysis/coverage/{id}_{tech}.{ref_type}.bam"
+    output:
+        "analysis/coverage/{id}_{tech}.{ref_type}.depth.tsv"
+    conda:
+        "envs/mapping.yaml"
+    shell:
+        "samtools depth -aa {input} > {output}"
+
+rule final_output:
+    input:
+        pgap = "analysis/pgap/{id}",
+        trim = "analysis/fosmids/{id}.info",
+        pretrim_fasta = choose_assembly,
+        fasta = "analysis/fosmids/{id}.fna",
+        vector = vector_complete_for_fosmid,
+        metabuli = "analysis/metabuli/{id}_classifications.tsv",
+        metabuli_report = "analysis/metabuli/{id}_report.tsv",
+        flye_input = lambda w: flye_input(w) if samples[w.id]["nanopore"] else [],
+        insert_depth = lambda w: [p for p in [coverage_insert_depth_output(w)] if p is not None],
+        vector_depth = lambda w: [p for p in [coverage_vector_depth_output(w)] if p is not None]
+    output:
+        gbk = "output/{id}/{id}.gbk",
+        report = "output/{id}/report.xlsx"
+    params:
+        organism = lambda w: samples[w.id]['organism'],
+        prefix = lambda w: samples[w.id]['prefix'],
+        read_mode = coverage_read_mode
     conda:
         "envs/python.yaml"
     script:
-        "scripts/report.py"
+        "scripts/final_output.py"

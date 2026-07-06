@@ -6,4 +6,4 @@ output/
 pre_assembled/
 log
 *.log
-workflow/tools/__pycache__/
+__pycache__/

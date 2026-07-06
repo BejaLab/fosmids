@@ -3,3 +3,4 @@ channels:
 dependencies:
  - biopython=1.87
  - pandas=3.0.3
+ - openpyxl=3.1.5
