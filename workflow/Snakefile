@@ -347,7 +347,7 @@ rule pgap:
     threads:
         8
     shell:
-        "pgap.py --debug --ignore-all-errors --report-usage-true --cpu {threads} -o {output} {input.yaml} &> {log}"
+        "pgap.py --debug --ignore-all-errors --report-usage-true --no-self-update --no-internet --cpu {threads} -o {output} {input.yaml} &> {log}"
 
 rule gbf2tbl:
     input:
