@@ -28,10 +28,10 @@ fosmids = list(samples.keys())
 def get_pgap_taxonomy_path():
     install_dir = Path(os.getenv('PGAP_INPUT_DIR', Path.home() / '.pgap'))
     if not install_dir.exists():
-        raise FileNotFoundError("PGAP data directory not found")
+        raise FileNotFoundError("PGAP data directory not found: run `pgap.py --update` first")
     input_dirs = sorted([d for d in install_dir.glob('input-*') if d.is_dir()])
     if not input_dirs:
-        raise FileNotFoundError(f"No 'input-*' directories found in {install_dir}")
+        raise FileNotFoundError(f"No 'input-*' directories found in {install_dir}: run `pgap.py --update` first")
     latest_input_dir = input_dirs[-1]
     db_path = latest_input_dir / "uniColl_path" / "taxonomy.sqlite3"
     if not db_path.exists():
