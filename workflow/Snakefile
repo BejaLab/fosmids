@@ -29,11 +29,11 @@ def get_pgap_taxonomy_path():
     install_dir = Path(os.getenv('PGAP_INPUT_DIR', Path.home() / '.pgap'))
     if not install_dir.exists():
         raise FileNotFoundError("PGAP data directory not found")
-    version_file = install_dir / 'VERSION'
-    if not version_file.exists():
-        raise FileNotFoundError("PGAP's VERSION file not found")
-    version = version_file.read_text(encoding='utf-8').strip()
-    db_path = install_dir / f"input-{version}" / "uniColl_path" / "taxonomy.sqlite3"
+    input_dirs = sorted([d for d in install_dir.glob('input-*') if d.is_dir()])
+    if not input_dirs:
+        raise FileNotFoundError(f"No 'input-*' directories found in {install_dir}")
+    latest_input_dir = input_dirs[-1]
+    db_path = latest_input_dir / "uniColl_path" / "taxonomy.sqlite3"
     if not db_path.exists():
         raise FileNotFoundError("PGAP's taxonomy database file not found")
     return db_path
